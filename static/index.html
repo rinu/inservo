@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inservo</title>
+  <meta name="theme-color" content="#0e7ea8">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Inservo">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" href="/icon-192.png">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="busy-bar" aria-hidden="true"></div>
+
+  <section id="login-view" class="login-view">
+    <form id="login-form" class="card">
+      <p class="brand">Inservo</p>
+      <h1>Sign in</h1>
+      <p class="lede">Same account as app.inservo.ee. The password is only used to sign in and is not saved. Pictures are requested one at a time, and the next one waits until the current one is on screen.</p>
+      <label>
+        Email
+        <input id="username" name="username" type="email" autocomplete="username" required>
+      </label>
+      <label>
+        Password
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <p id="login-error" class="error" hidden></p>
+      <button type="submit" id="login-button">Sign in</button>
+    </form>
+  </section>
+
+  <main id="app" hidden>
+    <header class="top">
+      <div>
+        <p class="brand">Inservo</p>
+      </div>
+      <label class="camera-picker">
+        Camera
+        <select id="camera"></select>
+      </label>
+      <button type="button" id="logout">Log out</button>
+    </header>
+
+    <section class="stage" id="stage">
+      <img id="view" alt="">
+      <p id="notice" class="notice" hidden>No frame</p>
+      <div class="stage-meta">
+        <span id="badge" class="badge">Live</span>
+        <time id="clock"></time>
+        <span id="camera-name"></span>
+      </div>
+    </section>
+
+    <section class="controls">
+      <div class="row">
+        <button type="button" id="play" class="primary">Pause</button>
+        <button type="button" id="live">Live</button>
+        <div class="speeds" role="group" aria-label="Playback speed">
+          <button type="button" data-speed="0.5">0.5×</button>
+          <button type="button" data-speed="1" aria-pressed="true">1×</button>
+          <button type="button" data-speed="2">2×</button>
+          <button type="button" data-speed="3">3×</button>
+        </div>
+        <button type="button" id="fullscreen">Full screen</button>
+      </div>
+      <div class="row steps">
+        <button type="button" data-step="-86400">−1 day</button>
+        <button type="button" data-step="-3600">−1 hour</button>
+        <button type="button" data-step="-60">−1 min</button>
+        <button type="button" data-step="-10">−10 s</button>
+        <button type="button" id="frame-back">Previous frame</button>
+        <button type="button" id="frame-forward">Next frame</button>
+        <button type="button" data-step="10">+10 s</button>
+        <button type="button" data-step="60">+1 min</button>
+        <button type="button" data-step="3600">+1 hour</button>
+        <button type="button" data-step="86400">+1 day</button>
+      </div>
+      <div class="row when">
+        <label>
+          Date and time
+          <input id="when" type="datetime-local" step="1">
+        </label>
+        <button type="button" id="go-time">Go</button>
+      </div>
+      <label class="scrub">
+        Loaded footage
+        <input id="scrub" type="range" min="0" max="0" value="0" disabled>
+      </label>
+    </section>
+
+    <section class="motion">
+      <div class="row">
+        <button type="button" id="motion-prev">Previous day</button>
+        <h2 id="motion-date">Motion</h2>
+        <button type="button" id="motion-next">Next day</button>
+        <p id="motion-count" class="quiet"></p>
+      </div>
+      <div id="hours" class="hours"></div>
+      <ol id="hour-events" class="events"></ol>
+    </section>
+
+    <p id="status" class="status">Ready</p>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
