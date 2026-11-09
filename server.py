@@ -10,6 +10,7 @@ The browser waits for each response, then for the picture itself.
 import http.client
 import json
 import re
+import secrets
 import ssl
 import sys
 import threading
@@ -47,6 +48,8 @@ MAX_WINDOW = 300
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_CACHE = 40 * 1024 * 1024
 USER_AGENT = "InservoLocalClient/1.0"
+SESSION_COOKIE = "inservo_session"
+SESSION_MAX_AGE = 30 * 24 * 60 * 60
 
 _SSL = ssl.create_default_context()
 
@@ -504,7 +507,49 @@ def _login_message(html):
     return None
 
 
-SESSION = Inservo()
+class SessionStore:
+    """One Inservo login per browser. Visitors do not share a feed."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._items = {}
+
+    def get(self, token):
+        if not token:
+            return None
+        now = time.time()
+        with self._lock:
+            self._drop_expired(now)
+            item = self._items.get(token)
+            if item is None:
+                return None
+            item["seen"] = now
+            return item["client"]
+
+    def create(self):
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        with self._lock:
+            self._drop_expired(now)
+            self._items[token] = {"client": Inservo(), "seen": now}
+            return token, self._items[token]["client"]
+
+    def delete(self, token):
+        if not token:
+            return None
+        with self._lock:
+            item = self._items.pop(token, None)
+        if item is None:
+            return None
+        return item["client"]
+
+    def _drop_expired(self, now):
+        expired = [token for token, item in self._items.items() if now - item["seen"] > SESSION_MAX_AGE]
+        for token in expired:
+            del self._items[token]
+
+
+SESSIONS = SessionStore()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -577,49 +622,72 @@ class Handler(BaseHTTPRequestHandler):
         if not username or not password:
             self._send_json(400, {"ok": False, "error": "Enter both email and password."})
             return
-        with SESSION.lock:
-            ok, message = SESSION.login(username, password)
-            cameras = SESSION.cameras() if ok else []
-            server_time = SESSION.server_now() if ok else None
+        token = self._session_token()
+        client = SESSIONS.get(token)
+        fresh = client is None
+        if fresh:
+            token, client = SESSIONS.create()
+        try:
+            with client.lock:
+                ok, message = client.login(username, password)
+                cameras = client.cameras() if ok else []
+                server_time = client.server_now() if ok else None
+        except Exception:
+            if fresh:
+                SESSIONS.delete(token)
+            raise
         if not ok:
+            if fresh:
+                SESSIONS.delete(token)
             self._send_json(401, {"ok": False, "error": message})
             return
-        self._send_json(200, {"ok": True, "cameras": cameras, "serverTime": server_time})
+        self._send_json(200, {"ok": True, "cameras": cameras, "serverTime": server_time}, session=token)
 
     def _logout(self):
-        with SESSION.lock:
-            SESSION.logout()
-        self._send_json(200, {"ok": True})
+        token = self._session_token()
+        client = SESSIONS.delete(token)
+        if client is not None:
+            with client.lock:
+                client.logout()
+        self._send_json(200, {"ok": True}, clear_session=True)
 
     def _me(self):
-        with SESSION.lock:
-            if not SESSION.logged_in:
-                self._send_json(200, {"ok": False})
-                return
-            cameras = SESSION.cameras()
-            server_time = SESSION.server_now()
+        client = SESSIONS.get(self._session_token())
+        if client is None:
+            self._send_json(200, {"ok": False})
+            return
+        with client.lock:
+            signed_in = client.logged_in
+            cameras = client.cameras() if signed_in else []
+            server_time = client.server_now() if signed_in else None
+        if not signed_in:
+            self._send_json(200, {"ok": False})
+            return
         self._send_json(200, {"ok": True, "cameras": cameras, "serverTime": server_time})
 
     def _range(self, query):
         camera_id = _camera(query)
-        with SESSION.lock:
-            self._require()
-            payload = SESSION.range_for(camera_id)
+        client = self._client()
+        with client.lock:
+            self._require(client)
+            payload = client.range_for(camera_id)
         self._send_json(200, {"ok": True, **payload})
 
     def _events(self, query):
         camera_id = _camera(query)
         day = (query.get("day") or [""])[0]
-        with SESSION.lock:
-            self._require()
-            payload = SESSION.events_for(camera_id, day)
+        client = self._client()
+        with client.lock:
+            self._require(client)
+            payload = client.events_for(camera_id, day)
         self._send_json(200, {"ok": True, **payload})
 
     def _live(self, query):
         camera_id = _camera(query)
-        with SESSION.lock:
-            self._require()
-            payload = SESSION.live(camera_id)
+        client = self._client()
+        with client.lock:
+            self._require(client)
+            payload = client.live(camera_id)
         self._send_json(
             200,
             {
@@ -644,9 +712,10 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self._send_json(400, {"ok": False, "error": "Start and stop must be unix times."})
             return
-        with SESSION.lock:
-            self._require()
-            payload = SESSION.frames(camera_id, start, stop)
+        client = self._client()
+        with client.lock:
+            self._require(client)
+            payload = client.frames(camera_id, start, stop)
         self._send_json(200, {"ok": True, **payload})
         sys.stderr.write(
             "frames camera=%s %s-%s count=%s servers=%s %sms\n"
@@ -662,9 +731,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _image(self, server_key, frame_id):
         started = time.perf_counter()
-        with SESSION.lock:
-            self._require()
-            content_type, data = SESSION.image(server_key, frame_id)
+        client = self._client()
+        with client.lock:
+            self._require(client)
+            content_type, data = client.image(server_key, frame_id)
         self._send_bytes(
             200,
             data,
@@ -676,9 +746,41 @@ class Handler(BaseHTTPRequestHandler):
             % (server_key, frame_id, max(1, len(data) // 1024), int((time.perf_counter() - started) * 1000))
         )
 
-    def _require(self):
-        if not SESSION.logged_in:
+    def _client(self):
+        client = SESSIONS.get(self._session_token())
+        if client is None:
+            raise AuthError("Sign in first.")
+        return client
+
+    def _require(self, client):
+        if not client.logged_in:
             raise AuthError("Session ended. Sign in again.")
+
+    def _session_token(self):
+        header = self.headers.get("Cookie")
+        if not header:
+            return None
+        for part in header.split(";"):
+            name, separator, value = part.strip().partition("=")
+            if separator and name == SESSION_COOKIE and value:
+                return value
+        return None
+
+    def _https(self):
+        forwarded = self.headers.get("X-Forwarded-Proto") or ""
+        return forwarded.split(",")[0].strip().lower() == "https"
+
+    def _session_cookie(self, token, clear=False):
+        parts = [
+            "%s=%s" % (SESSION_COOKIE, "" if clear else token),
+            "HttpOnly",
+            "Path=/",
+            "SameSite=Lax",
+            "Max-Age=%d" % (0 if clear else SESSION_MAX_AGE),
+        ]
+        if self._https():
+            parts.append("Secure")
+        return "; ".join(parts)
 
     def _body(self):
         length = int(self.headers.get("Content-Length") or "0")
@@ -694,11 +796,22 @@ class Handler(BaseHTTPRequestHandler):
         data = file_path.read_bytes()
         self._send_bytes(200, data, content_type, {"Cache-Control": "no-store"})
 
-    def _send_json(self, status, payload):
+    def _send_json(self, status, payload, session=None, clear_session=False):
         data = json.dumps(payload).encode()
-        self._send_bytes(status, data, "application/json; charset=utf-8", {"Cache-Control": "no-store"})
+        cookies = []
+        if clear_session:
+            cookies.append(self._session_cookie("", clear=True))
+        elif session:
+            cookies.append(self._session_cookie(session))
+        self._send_bytes(
+            status,
+            data,
+            "application/json; charset=utf-8",
+            {"Cache-Control": "no-store"},
+            cookies,
+        )
 
-    def _send_bytes(self, status, data, content_type, extra=None):
+    def _send_bytes(self, status, data, content_type, extra=None, cookies=None):
         try:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -713,6 +826,8 @@ class Handler(BaseHTTPRequestHandler):
                     if key == "Cache-Control":
                         continue
                     self.send_header(key, value)
+            for cookie in cookies or []:
+                self.send_header("Set-Cookie", cookie)
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(data)
